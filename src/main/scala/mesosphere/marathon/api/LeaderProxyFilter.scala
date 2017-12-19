@@ -1,7 +1,10 @@
 package mesosphere.marathon
 package api
 
-import java.io.{ IOException, InputStream, OutputStream }
+import akka.NotUsed
+import akka.actor.ActorSystem
+import akka.stream.scaladsl.StreamConverters
+import akka.stream.ActorMaterializer
 import java.net._
 import javax.inject.Named
 import javax.net.ssl._
@@ -17,8 +20,10 @@ import mesosphere.marathon.HttpConf
 import mesosphere.marathon.core.election.ElectionService
 import mesosphere.marathon.io.IO
 import mesosphere.marathon.stream.Implicits._
+import org.apache.commons.io.IOUtils
 
 import scala.annotation.tailrec
+import scala.concurrent.{ ExecutionContext, Future }
 import scala.util.control.NonFatal
 import scala.util.{ Failure, Success, Try }
 
@@ -29,7 +34,7 @@ class LeaderProxyFilter @Inject() (
     httpConf: HttpConf,
     electionService: ElectionService,
     @Named(ModuleNames.HOST_PORT) myHostPort: String,
-    forwarder: RequestForwarder) extends Filter with StrictLogging {
+    forwarder: RequestForwarder)(implicit actorSystem: ActorSystem) extends Filter with StrictLogging {
 
   import LeaderProxyFilter._
 
@@ -136,13 +141,13 @@ object LeaderProxyFilter {
   * Forwards a HttpServletRequest to an URL.
   */
 trait RequestForwarder {
-  def forward(url: URL, request: HttpServletRequest, response: HttpServletResponse): Unit
+  def forward(url: URL, request: HttpServletRequest, response: HttpServletResponse)(implicit actorSystem: ActorSystem): Unit
 }
 
 class JavaUrlConnectionRequestForwarder(
     sslContext: SSLContext,
     leaderProxyConf: LeaderProxyConf,
-    myHostPort: String)
+    myHostPort: String)(implicit executionContext: ExecutionContext)
   extends RequestForwarder with StrictLogging {
 
   import JavaUrlConnectionRequestForwarder._
@@ -153,8 +158,7 @@ class JavaUrlConnectionRequestForwarder(
     override def verify(hostname: String, sslSession: SSLSession): Boolean = true
   }
 
-  override def forward(url: URL, request: HttpServletRequest, response: HttpServletResponse): Unit = {
-
+  override def forward(url: URL, request: HttpServletRequest, response: HttpServletResponse)(implicit actorSystem: ActorSystem): Unit = {
     def hasProxyLoop: Boolean = {
       Option(request.getHeaders(HEADER_VIA)).exists(_.seq.contains(viaValue))
     }
@@ -220,7 +224,7 @@ class JavaUrlConnectionRequestForwarder(
 
           IO.using(request.getInputStream) { requestInput =>
             IO.using(leaderConnection.getOutputStream) { proxyOutputStream =>
-              copy(request.getInputStream, proxyOutputStream)
+              IOUtils.copy(request.getInputStream, proxyOutputStream)
             }
           }
       }
@@ -254,27 +258,31 @@ class JavaUrlConnectionRequestForwarder(
       Done
     }
 
-    def cloneResponseEntity(remote: HttpURLConnection, response: HttpServletResponse): Unit = {
-      IO.using(response.getOutputStream) { output =>
-        try {
-          IO.using(remote.getInputStream) { connectionInput => copy(connectionInput, output) }
-        } catch {
-          case e: IOException =>
-            logger.debug("got exception response, this is maybe an error code", e)
-            IO.using(remote.getErrorStream) { connectionError => copy(connectionError, output) }
-        }
-      }
+    def cloneResponseEntity(remote: HttpURLConnection)(implicit actorSystem: ActorSystem): Future[Done] = {
+      implicit val mat = ActorMaterializer()
+
+      val outputSink = ServletOutputStreamSink.forRequest(request)
+
+      // TODO - make http reading stream non-blocking also
+      val upstream = StreamConverters.fromInputStream(() => remote.getInputStream, 8192).
+        recoverWithRetries(1, {
+          case ex =>
+            StreamConverters.fromInputStream(() => remote.getErrorStream).mapMaterializedValue { _ => NotUsed }
+        })
+
+      upstream.runWith(outputSink)
     }
 
     logger.info(s"Proxying request to ${request.getMethod} $url from $myHostPort")
 
-    try {
+    val result: Future[Done] = try {
       if (hasProxyLoop) {
         logger.error("Prevent proxy cycle, rejecting request")
         response.sendError(BadGateway.intValue, ERROR_STATUS_LOOP)
+        Future.successful(Done)
       } else {
         val leaderConnection: HttpURLConnection = createAndConfigureConnection(url)
-        try {
+        val leaderConnectionForward: Future[Done] = try {
           copyRequestToConnection(leaderConnection, request) match {
             case Failure(ex: ConnectException) =>
               logger.error(ERROR_STATUS_CONNECTION_REFUSED, ex)
@@ -289,27 +297,26 @@ class JavaUrlConnectionRequestForwarder(
           }
           copyConnectionResponse(response)(
             () => cloneResponseStatusAndHeader(leaderConnection, response),
-            () => cloneResponseEntity(leaderConnection, response)
+            () => cloneResponseEntity(leaderConnection)
           )
-        } finally {
-          Closeables.closeQuietly(leaderConnection.getInputStream())
-          Closeables.closeQuietly(leaderConnection.getErrorStream())
+        } catch {
+          case ex: Throwable =>
+            Future.failed(ex)
+        }
+
+        leaderConnectionForward.andThen {
+          case _ =>
+            Closeables.closeQuietly(leaderConnection.getInputStream())
+            Closeables.closeQuietly(leaderConnection.getErrorStream())
         }
       }
-    } finally {
-      Closeables.closeQuietly(request.getInputStream())
-      Closeables.close(response.getOutputStream(), true)
+    } catch {
+      case ex: Exception => Future.failed(ex)
     }
 
-  }
-
-  def copy(nullableIn: InputStream, nullableOut: OutputStream): Unit = {
-    try {
-      // Note: This method blocks. That means it never returns if the request is for an SSE stream.
-      IO.transfer(Option(nullableIn), Option(nullableOut))
-    } catch {
-      case e: UnknownServiceException =>
-        logger.warn("unexpected unknown service exception", e)
+    result.onComplete {
+      case _ =>
+        Closeables.closeQuietly(request.getInputStream())
     }
   }
 }
@@ -326,16 +333,18 @@ object JavaUrlConnectionRequestForwarder extends StrictLogging {
   val HEADER_FORWARDED_FOR: String = "X-Forwarded-For"
 
   def copyConnectionResponse(response: HttpServletResponse)(
-    forwardHeaders: () => Try[Done], forwardEntity: () => Unit): Unit = {
+    forwardHeaders: () => Try[Done], forwardEntity: () => Future[Done]): Future[Done] = {
 
     forwardHeaders() match {
       case Failure(ex: SocketTimeoutException) =>
         logger.error(ERROR_STATUS_GATEWAY_TIMEOUT, ex)
         response.sendError(GatewayTimeout.intValue, ERROR_STATUS_GATEWAY_TIMEOUT)
+        Future.failed(ex)
       case Failure(ex) =>
         // early detection of proxy failure, before we commit the status code to the response stream
         logger.warn("failed to proxy response headers from leader", ex)
         response.sendError(BadGateway.intValue, ERROR_STATUS_BAD_CONNECTION)
+        Future.failed(ex)
       case Success(_) =>
         forwardEntity()
     }

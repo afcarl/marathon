@@ -111,6 +111,7 @@ class AppsResource @Inject() (
     @PathParam("id") id: String,
     @QueryParam("embed") embed: java.util.Set[String],
     @Context req: HttpServletRequest): Response = authenticated(req) { implicit identity =>
+
     val resolvedEmbed = InfoEmbedResolver.resolveApp(embed) ++ Set(
       // deprecated. For compatibility.
       AppInfo.Embed.Counts, AppInfo.Embed.Tasks, AppInfo.Embed.LastTaskFailure, AppInfo.Embed.Deployments

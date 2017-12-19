@@ -1,19 +1,21 @@
 package mesosphere.marathon
 package api
 
+import akka.Done
 import java.io.IOException
 import java.net.{ HttpURLConnection, URL }
 import javax.servlet.FilterChain
 import javax.servlet.http.{ HttpServletRequest, HttpServletResponse }
 
-import mesosphere.UnitTest
+import mesosphere.AkkaUnitTest
 import mesosphere.marathon.HttpConf
 import mesosphere.marathon.core.election.ElectionService
 import akka.http.scaladsl.model.StatusCodes._
 import org.mockito.Mockito._
 import org.rogach.scallop.ScallopConf
+import scala.concurrent.Future
 
-class LeaderProxyFilterTest extends UnitTest {
+class LeaderProxyFilterTest extends AkkaUnitTest {
 
   def httpConf(args: String*): HttpConf = {
     new ScallopConf(args) with HttpConf {
@@ -185,11 +187,13 @@ class LeaderProxyFilterTest extends UnitTest {
       when(urlConnection.getResponseCode).thenReturn(200)
 
       JavaUrlConnectionRequestForwarder.copyConnectionResponse(response)(
-        () => {
+        forwardHeaders = { () =>
           response.setStatus(200)
           scala.util.Failure(new IOException("foo"))
         },
-        () => {}
+        forwardEntity = { () =>
+          Future.successful(Done)
+        }
       )
 
       verify(response, times(1)).setStatus(200)

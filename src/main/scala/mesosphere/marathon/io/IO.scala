@@ -1,14 +1,13 @@
 package mesosphere.marathon
 package io
 
-import java.io.{ BufferedInputStream, Closeable, File, FileInputStream, FileOutputStream, FileNotFoundException, InputStream, OutputStream }
-
-import com.typesafe.scalalogging.StrictLogging
-import org.apache.commons.io.IOUtils
+import java.io.{ BufferedInputStream, Closeable, File, FileInputStream, FileOutputStream, FileNotFoundException, InputStream }
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 
-import scala.annotation.tailrec
+import com.typesafe.scalalogging.StrictLogging
+import org.apache.commons.io.CopyUtils
+
 import scala.util.{ Failure, Success, Try }
 
 object IO extends StrictLogging {
@@ -41,45 +40,6 @@ object IO extends StrictLogging {
     }
   }
 
-  def using[A <: Closeable, B](closeable: A)(fn: (A) => B): B = {
-    try {
-      fn(closeable)
-    } finally {
-      IOUtils.closeQuietly(closeable)
-    }
-  }
-
-  /**
-    * Copies all bytes from an input stream to an outputstream.
-    *
-    * The method is adapted from [[com.google.common.io.ByteStreams.copy]] with the only difference that we flush after
-    * each write. Note: This method is blocking!
-    *
-    * @param maybeFrom Inputstream for copy from.
-    * @param maybeTo Outputstream to copy to.
-    * @return
-    */
-  def transfer(maybeFrom: Option[InputStream], maybeTo: Option[OutputStream]): Long = {
-    (maybeFrom, maybeTo) match {
-      case (Some(from), Some(to)) =>
-        @tailrec def iter(buf: Array[Byte], total: Long): Long =
-          from.read(buf) match {
-            case -1 => total
-            case r =>
-              to.write(buf, 0, r)
-              to.flush()
-              iter(buf, total + r)
-          }
-
-        iter(new Array[Byte](8192), 0L)
-      case _ =>
-        logger.debug("Did not copy any data.")
-        0
-    }
-  }
-
-  def transfer(from: InputStream, to: OutputStream): Long = transfer(Some(from), Some(to))
-
   /**
     * Extracts a tarball GZipped file to and output directory.
     *
@@ -96,11 +56,23 @@ object IO extends StrictLogging {
       else {
         destPath.getParentFile.mkdirs()
         destPath.createNewFile
-        transfer(tarIs, new FileOutputStream(destPath))
+        CopyUtils.copy(tarIs, new FileOutputStream(destPath))
       }
       entry = tarIs.getNextTarEntry
     }
     tarIs.close()
+  }
+
+  def using[A <: Closeable, B](closeable: A)(fn: (A) => B): B = {
+    try {
+      fn(closeable)
+    } finally {
+      try closeable.close()
+      catch {
+        case ex: Exception =>
+        // suppress exceptions
+      }
+    }
   }
 }
 

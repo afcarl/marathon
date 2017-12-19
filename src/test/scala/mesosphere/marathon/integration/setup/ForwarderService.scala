@@ -8,6 +8,7 @@ import javax.servlet.DispatcherType
 import javax.ws.rs.core.Response
 import javax.ws.rs.{ GET, Path }
 import akka.Done
+import akka.actor.ActorSystem
 import akka.actor.ActorRef
 import com.google.common.util.concurrent.Service
 import com.typesafe.scalalogging.StrictLogging
@@ -25,7 +26,7 @@ import org.glassfish.jersey.servlet.ServletContainer
 import org.rogach.scallop.ScallopConf
 
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.{ Future, Promise }
+import scala.concurrent.{ Future, Promise, ExecutionContext }
 import scala.sys.process.{ Process, ProcessLogger }
 
 /**
@@ -152,6 +153,8 @@ object ForwarderService extends StrictLogging {
   class ForwarderConf(args: Seq[String]) extends ScallopConf(args) with HttpConf with LeaderProxyConf
 
   def main(args: Array[String]): Unit = {
+    import ExecutionContext.Implicits.global
+    implicit val as = ActorSystem()
     Kamon.start()
     val service = args.toList match {
       case "helloApp" :: tail =>
@@ -164,13 +167,13 @@ object ForwarderService extends StrictLogging {
     service.awaitTerminated()
   }
 
-  private def createHelloApp(args: String*): Service = {
+  private def createHelloApp(args: String*)(implicit actorSystem: ActorSystem, ec: ExecutionContext): Service = {
     val conf = createConf(args: _*)
     logger.info(s"Start hello app at ${conf.httpPort()}")
     startImpl(conf, new LeaderInfoModule(elected = true, leaderHostPort = None))
   }
 
-  private def createForwarder(forwardToPort: Int, args: String*): Service = {
+  private def createForwarder(forwardToPort: Int, args: String*)(implicit actorSystem: ActorSystem, ec: ExecutionContext): Service = {
     val conf = createConf(args: _*)
     logger.info(s"Start forwarder on port ${conf.httpPort()}, forwarding to $forwardToPort")
     startImpl(conf, new LeaderInfoModule(elected = false, leaderHostPort = Some(s"localhost:$forwardToPort")))
@@ -182,7 +185,7 @@ object ForwarderService extends StrictLogging {
     }
   }
 
-  private def startImpl(conf: ForwarderConf, leaderModule: LeaderInfoModule): Service = {
+  private def startImpl(conf: ForwarderConf, leaderModule: LeaderInfoModule)(implicit actorSystem: ActorSystem, ec: ExecutionContext): Service = {
     val myHostPort = if (conf.disableHttp()) s"localhost:${conf.httpsPort()}" else s"localhost:${conf.httpPort()}"
 
     val leaderProxyFilterModule = new LeaderProxyFilterModule()

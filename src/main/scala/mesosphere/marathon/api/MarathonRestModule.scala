@@ -6,6 +6,7 @@ import javax.inject.Named
 
 import com.google.inject.{ Provides, Scopes, Singleton }
 import mesosphere.marathon.io.SSLContextUtil
+import scala.concurrent.ExecutionContext
 
 /**
   * Setup the dependencies for the LeaderProxyFilter.
@@ -20,7 +21,7 @@ class LeaderProxyFilterModule extends AbstractModule {
   def provideRequestForwarder(
     httpConf: HttpConf,
     leaderProxyConf: LeaderProxyConf,
-    @Named(ModuleNames.HOST_PORT) myHostPort: String): RequestForwarder = {
+    @Named(ModuleNames.HOST_PORT) myHostPort: String)(implicit executionContext: ExecutionContext): RequestForwarder = {
     val sslContext = SSLContextUtil.createSSLContext(httpConf.sslKeystorePath.get, httpConf.sslKeystorePassword.get)
     new JavaUrlConnectionRequestForwarder(sslContext, leaderProxyConf: LeaderProxyConf, myHostPort: String)
   }
