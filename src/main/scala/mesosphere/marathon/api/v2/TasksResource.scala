@@ -37,10 +37,9 @@ class TasksResource @Inject() (
     groupManager: GroupManager,
     healthCheckManager: HealthCheckManager,
     val authenticator: Authenticator,
-    val authorizer: Authorizer) extends AuthResource {
+    val authorizer: Authorizer)(implicit val executionContext: ExecutionContext) extends AuthResource {
 
   val log = LoggerFactory.getLogger(getClass.getName)
-  implicit val ec = ExecutionContext.Implicits.global
 
   @GET
   @Produces(Array(MediaType.APPLICATION_JSON))

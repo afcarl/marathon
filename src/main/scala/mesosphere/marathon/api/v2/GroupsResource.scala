@@ -21,8 +21,7 @@ import mesosphere.marathon.state._
 import mesosphere.marathon.stream.Implicits._
 import mesosphere.marathon.stream.Sink
 import play.api.libs.json.Json
-
-import scala.concurrent.Future
+import scala.concurrent.{ ExecutionContext, Future }
 import scala.util.matching.Regex
 
 @Path("v2/groups")
@@ -34,7 +33,8 @@ class GroupsResource @Inject() (
     groupsService: GroupApiService)(implicit
     val authenticator: Authenticator,
     val authorizer: Authorizer,
-    mat: Materializer) extends AuthResource {
+    mat: Materializer,
+    val executionContext: ExecutionContext) extends AuthResource {
 
   import GroupsResource._
 
@@ -79,8 +79,6 @@ class GroupsResource @Inject() (
     @PathParam("id") id: String,
     @QueryParam("embed") embed: java.util.Set[String],
     @Context req: HttpServletRequest): Response = authenticated(req) { implicit identity =>
-
-    import scala.concurrent.ExecutionContext.Implicits.global
 
     val embeds: Set[String] = if (embed.isEmpty) defaultEmbeds else embed
     val (appEmbed, groupEmbed) = resolveAppGroup(embeds)

@@ -12,6 +12,7 @@ import mesosphere.marathon.plugin.auth.{ Authenticator, Authorizer, ViewRunSpec 
 import mesosphere.marathon.state.PathId._
 import mesosphere.marathon.state.Timestamp
 import org.slf4j.LoggerFactory
+import scala.concurrent.ExecutionContext
 
 @Produces(Array(MediaType.APPLICATION_JSON))
 @Consumes(Array(MediaType.APPLICATION_JSON))
@@ -20,7 +21,7 @@ class AppVersionsResource(
     groupManager: GroupManager,
     val authenticator: Authenticator,
     val authorizer: Authorizer,
-    val config: MarathonConf) extends AuthResource {
+    val config: MarathonConf)(implicit val executionContext: ExecutionContext) extends AuthResource {
 
   val log = LoggerFactory.getLogger(getClass.getName)
 

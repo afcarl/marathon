@@ -2,24 +2,65 @@ package mesosphere.marathon
 package api
 
 import java.net.URI
+import javax.servlet.http.HttpServletRequest
+import javax.ws.rs.container.AsyncResponse
 import javax.ws.rs.core.Response
 import javax.ws.rs.core.Response.{ ResponseBuilder, Status }
 
 import akka.http.scaladsl.model.StatusCodes
-import com.wix.accord._
+import com.wix.accord.{ Failure => ValidationFailure, Validator, Success => ValidationSuccess }
 import mesosphere.marathon.api.v2.Validation._
 import mesosphere.marathon.api.v2.json.Formats._
 import mesosphere.marathon.core.deployment.DeploymentPlan
+import mesosphere.marathon.plugin.auth.{ Authenticator, Authorizer, Identity }
 import mesosphere.marathon.state.{ PathId, Timestamp }
 import play.api.libs.json.JsonValidationError
 import play.api.libs.json.Json.JsValueWrapper
 import play.api.libs.json._
-
-import scala.concurrent.{ Await, Awaitable }
+import scala.concurrent.{ Await, Awaitable, ExecutionContext, Future }
+import scala.util.{ Failure, Success, Try }
 
 trait RestResource extends JaxResource {
+  import RestResource.{
+    Rejection,
+    RejectionException,
+    AccessDeniedRejection,
+    NotAuthenticatedRejection,
+    ServiceUnavailableRejection
+  }
 
+  implicit val executionContext: ExecutionContext
   protected val config: MarathonConf
+  case class FailureResponse(response: Response) extends Throwable
+
+  def sendResponse(asyncResponse: AsyncResponse)(future: Future[Response]) = {
+    future.transform(resolveRejections).onComplete {
+      case Success(r) =>
+        asyncResponse.resume(r: Object)
+      case Failure(f: Throwable) =>
+        asyncResponse.resume(f: Throwable)
+    }
+  }
+
+  def resolveRejections(resp: Try[Response]): Try[Response] = {
+    def rejectionToResponse(rejection: Rejection): Response = rejection match {
+      case AccessDeniedRejection(authorizer, identity) =>
+        ResponseFacade(authorizer.handleNotAuthorized(identity, _))
+      case NotAuthenticatedRejection(authenticator, request) =>
+        val requestWrapper = new RequestFacade(request)
+        ResponseFacade(authenticator.handleNotAuthenticated(requestWrapper, _))
+      case ServiceUnavailableRejection =>
+        Response.status(Response.Status.SERVICE_UNAVAILABLE).build()
+    }
+
+    resp match {
+      case Success(response) =>
+        Success(response)
+      case Failure(RejectionException(rejection)) =>
+        Success(rejectionToResponse(rejection))
+      case f @ Failure(_) => f
+    }
+  }
 
   protected def unknownGroup(id: PathId, version: Option[Timestamp] = None): Response = {
     notFound(s"Group '$id' does not exist" + version.fold("")(v => s" in version $v"))
@@ -71,10 +112,10 @@ trait RestResource extends JaxResource {
     */
   protected def withValid[T](t: T)(fn: T => Response)(implicit validator: Validator[T]): Response = {
     validator(t) match {
-      case f: Failure =>
+      case f: ValidationFailure =>
         val entity = Json.toJson(f).toString
         Response.status(StatusCodes.UnprocessableEntity.intValue).entity(entity).build()
-      case Success => fn(t)
+      case ValidationSuccess => fn(t)
     }
   }
 
@@ -105,6 +146,13 @@ trait RestResource extends JaxResource {
 }
 
 object RestResource {
+  sealed trait Rejection {}
+  case class AccessDeniedRejection(authorizer: Authorizer, identity: Identity) extends Rejection
+  case class NotAuthenticatedRejection(authenticator: Authenticator, request: HttpServletRequest) extends Rejection
+  case object ServiceUnavailableRejection extends Rejection
+
+  case class RejectionException(rejection: Rejection) extends Exception(s"Unhandled rejection: ${rejection}")
+
   val DeploymentHeader = "Marathon-Deployment-Id"
 
   def entity(err: scala.collection.Seq[(JsPath, scala.collection.Seq[JsonValidationError])]): JsValue = {

@@ -29,7 +29,7 @@ class LeaderResource @Inject() (
     val runtimeConfigRepo: RuntimeConfigurationRepository,
     val authenticator: Authenticator,
     val authorizer: Authorizer,
-    val scheduler: Scheduler)(implicit executionContext: ExecutionContext)
+    val scheduler: Scheduler)(implicit val executionContext: ExecutionContext)
   extends RestResource with AuthResource {
 
   @GET
